@@ -10,12 +10,13 @@ def checkpoint_init_weights(path):
         shared_weights=1 if vocab_size>0 else 0
         vocab_size=abs(vocab_size)
         head_size=dim//n_q_heads
+        kv_dim=head_size*n_kv_heads
 
         token_embedding_table = read_floats(f, vocab_size * dim)
         rms_att_weight = read_floats(f, n_layers * dim)
         wq = read_floats(f, n_layers * dim * dim)
-        wk = read_floats(f, n_layers * dim * dim)
-        wv = read_floats(f, n_layers * dim * dim)
+        wk = read_floats(f, n_layers * dim * kv_dim)
+        wv = read_floats(f, n_layers * dim * kv_dim)
         wo = read_floats(f, n_layers * dim * dim)
         rms_ffn_weight = read_floats(f, n_layers * dim)
         w1 = read_floats(f, n_layers * dim * hidden_dim)
@@ -37,8 +38,8 @@ def checkpoint_init_weights(path):
         layer['qkv_head_size'] = head_size
         layer['n_kv_heads'] = n_kv_heads
         layer['Wq'] = torch.tensor(wq[l*dim*dim:(l+1)*dim*dim]).view(dim, dim).T
-        layer['Wk'] = torch.tensor(wk[l*dim*dim:(l+1)*dim*dim]).view(dim, dim).T
-        layer['Wv'] = torch.tensor(wv[l*dim*dim:(l+1)*dim*dim]).view(dim, dim).T
+        layer['Wk'] = torch.tensor(wk[l*dim*dim:(l+1)*dim*kv_dim]).view(kv_dim, dim).T
+        layer['Wv'] = torch.tensor(wv[l*dim*dim:(l+1)*dim*kv_dim]).view(kv_dim, dim).T
         layer['Wo'] = torch.tensor(wo[l*dim*dim:(l+1)*dim*dim]).view(dim, dim).T
         layer['W_rms'] = torch.tensor(rms_att_weight[l*dim:(l+1)*dim])
         layer['W_ffn'] = torch.tensor(rms_ffn_weight[l*dim:(l+1)*dim])
@@ -137,6 +138,14 @@ def sample(logits,temperature,top_p_value):
     return torch.multinomial(prob, num_samples=1).item() #multinomial根据概率分布采样
 #温度大于0 就根据概率分布采样，温度越高，采样越随机，温度越低，采样越确定，这个除以温度是为了控制采样的随机性，温度越高，softmax的输出分布越平坦，采样越随机；温度越低，softmax的输出分布越尖锐，采样越确定。
 
+import re
+
+def _unescape_token(s):
+    # 把词表里字面的 <0xXX> 转义还原成真正的字节
+    def repl(m):
+        return bytes([int(m.group(1), 16)])
+    return re.sub(r'<0x([0-9A-Fa-f]{2})>', lambda m: repl(m).decode('latin1'), s)
+
 def tokenizer_init(path,vocab_size):
     vocab,vocab_scores=[],[]
     with open(path,'rb') as f:
@@ -144,7 +153,13 @@ def tokenizer_init(path,vocab_size):
         for _ in range(vocab_size):
             vocab_scores.append(struct.unpack('f',f.read(4))[0])
             length=struct.unpack('i',f.read(4))[0]
-            vocab.append(f.read(length).decode('utf8',errors='replace'))
+            raw = f.read(length)
+            # 先按 utf8 解码；失败则按 latin1 保留原始字节
+            try:
+                token = raw.decode('utf8')
+            except UnicodeDecodeError:
+                token = raw.decode('latin1')
+            vocab.append(_unescape_token(token))
     return vocab,vocab_scores,max_token_length
 #词表读取
 
@@ -206,9 +221,11 @@ def generate(checkpoint,tokenizer_path,prompt,steps,temperature,top_p_value):
 
 
 def main():
+    import os
+    base_dir = os.path.dirname(os.path.abspath(__file__))
     generate(
-        checkpoint='attention/stories15M.bin',
-        tokenizer_path='attention/tokenizer.bin',
+        checkpoint=os.path.join(base_dir, 'stories15M.bin'),
+        tokenizer_path=os.path.join(base_dir, 'tokenizer.bin'),
         prompt="Once upon a time",
         steps=256,
         temperature=0.8,
